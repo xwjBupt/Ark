@@ -1,0 +1,9 @@
+# Verified training environment: Python 3.10, CUDA 12.4.
+# Install the CUDA-specific torch wheels from the PyTorch cu124 index.
+torch==2.6.0
+torchvision==0.21.0
+timm==1.0.22
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.7.2
+Pillow==12.2.0

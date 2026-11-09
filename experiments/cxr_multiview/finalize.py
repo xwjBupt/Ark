@@ -1,0 +1,103 @@
+"""Evaluate exported weights, select on validation, freeze, then predict test."""
+import argparse
+import itertools
+import json
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from metrics import evaluate, fit_thresholds
+from common import sha256_file
+from predict import predict_checkpoint, predict_bundle, write_submission
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--runs", type=Path, nargs="+", required=True)
+    parser.add_argument("--max-model-bytes", type=int, default=500_000_000)
+    args = parser.parse_args()
+    torch.set_num_threads(4)
+    args.output.mkdir(parents=True, exist_ok=True)
+    results, candidates = [], []
+    labels = None
+    for run in sorted(args.runs):
+        path = run/"best.pt"
+        if not path.exists():
+            continue
+        y, probabilities = predict_checkpoint(path, args.data/"valid.json")
+        if labels is not None and not np.array_equal(labels, y):
+            raise ValueError("Validation study order/labels do not match")
+        labels = y
+        np.savez_compressed(run/"exported_valid.npz", labels=y, probabilities=probabilities)
+        metrics = evaluate(y, probabilities)
+        item = {"name": run.name, "path": path, "bytes": path.stat().st_size,
+                "probabilities": probabilities, "metrics": metrics}
+        results.append(item)
+        print("EXPORTED VALID", run.name, metrics["macro_auc"], metrics["macro_ap"], flush=True)
+        if item["bytes"] <= args.max_model_bytes:
+            candidates.append({"members": [(len(results)-1, 1.0)], "probabilities": probabilities,
+                               "metrics": metrics, "bytes": item["bytes"]})
+    if not candidates:
+        raise RuntimeError("No eligible checkpoints under the model size limit")
+    single = max(candidates, key=lambda c: c["metrics"]["macro_auc"])
+    for i, j in itertools.combinations(range(len(results)), 2):
+        size = results[i]["bytes"]+results[j]["bytes"]
+        if size+100_000 > args.max_model_bytes:
+            continue
+        for weight in [0.25, 0.5, 0.75]:
+            probabilities = weight*results[i]["probabilities"]+(1-weight)*results[j]["probabilities"]
+            candidates.append({"members": [(i, weight), (j, 1-weight)], "probabilities": probabilities,
+                               "metrics": evaluate(labels, probabilities), "bytes": size})
+    best = max(candidates, key=lambda c: c["metrics"]["macro_auc"])
+    # The competition ranks by Macro-AUC first. Keep the validation-best candidate
+    # when its deduplicated inference weights remain under the 500 MB limit.
+    thresholds = fit_thresholds(labels, best["probabilities"])
+    metrics = evaluate(labels, best["probabilities"], thresholds)
+    models = []
+    for index, weight in best["members"]:
+        item = results[index]
+        filename = f"{item['name']}.pt"
+        destination = args.output/filename
+        shutil.copyfile(item["path"], destination)
+        digest = sha256_file(destination)
+        models.append({"name": item["name"], "checkpoint": filename, "weight": weight,
+                       "sha256": digest, "bytes": destination.stat().st_size})
+    bundle = {
+        "models": models, "thresholds": thresholds,
+        "task": "multi-label; ten independent sigmoid probabilities per Study_id",
+        "pooling": "per-checkpoint config; attention over views for the first runs, noisy_or for v2",
+        "selection": "Highest Macro-AUC on labeled validation only; pair weights grid {0.25,0.5,0.75}",
+        "validation_used_for_training": False, "test_used_for_fitting": False,
+        "inference_precision": "fp16_autocast", "random_inference_augmentation": False,
+        "competition_eligible": False,
+        "reason": "User requested medical Ark initialization; saved competition rules prohibit medical pretrained weights",
+        "t4_latency_verified": False, "created_utc": datetime.now(timezone.utc).isoformat(),
+        "validation_metrics": metrics,
+    }
+    (args.output/"bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False))
+    np.savez_compressed(args.output/"validation_predictions.npz", labels=labels, probabilities=best["probabilities"])
+    report = []
+    for candidate in sorted(candidates, key=lambda c: -c["metrics"]["macro_auc"]):
+        report.append({"members": [{"name": results[i]["name"], "weight": w} for i, w in candidate["members"]],
+                       "bytes": candidate["bytes"], "macro_auc": candidate["metrics"]["macro_auc"],
+                       "macro_ap": candidate["metrics"]["macro_ap"], "macro_f1_05": candidate["metrics"]["macro_f1_05"]})
+    (args.output/"model_comparison.json").write_text(json.dumps(report, indent=2))
+    actual_size = sum(member["bytes"] for member in models)+(args.output/"bundle.json").stat().st_size
+    if actual_size > args.max_model_bytes:
+        raise ValueError(f"Final inference assets exceed size limit: {actual_size}")
+    print("FROZEN SELECTION", json.dumps(bundle, ensure_ascii=False), flush=True)
+    # Test inference starts only after model choice and thresholds have been written.
+    predict_bundle(args.output/"bundle.json", args.data/"test.json", args.output/"submission.csv", raw=True)
+    expected_rows = 10*len(json.loads((args.data/"test.json").read_text()))
+    (args.output/"DONE.json").write_text(json.dumps({"finished": True, "rows": expected_rows,
+                        "validation_macro_auc": metrics["macro_auc"], "inference_bytes": actual_size}, indent=2))
+    print("FINAL SUBMISSION", args.output/"submission.csv", flush=True)
+
+
+if __name__ == "__main__":
+    main()

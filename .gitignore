@@ -1,2 +1,5 @@
 .DS_Store
 /pretrained_ckpts/
+/artifacts/
+*.pyc
+*.csv
