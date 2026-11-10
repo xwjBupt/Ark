@@ -53,7 +53,10 @@ class MultiViewModel(nn.Module):
             state = state.get("teacher", state)
             state = {k.removeprefix("module."): v for k, v in state.items()}
             state = {k: v for k, v in state.items() if k.startswith(("patch_embed.", "layers.", "norm."))}
-        elif init != "imagenet":
+        elif init == "imagenet":
+            if Path(path).name != PRETRAINS[backbone]["filename"]:
+                raise ValueError("ImageNet initialization requires the documented public weight filename")
+        else:
             raise ValueError(f"Unknown initialization: {init}")
         if backbone.startswith("swin"):
             from timm.models.swin_transformer import checkpoint_filter_fn

@@ -52,7 +52,7 @@ def write_submission(records, probabilities, thresholds, output):
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.with_suffix(".tmp.csv")
-    frame.to_csv(temporary, index=False, encoding="utf-8", float_format="%.8f")
+    frame.to_csv(temporary, index=False, encoding="utf-8", float_format="%.17g")
     temporary.replace(output)
     return len(frame)
 

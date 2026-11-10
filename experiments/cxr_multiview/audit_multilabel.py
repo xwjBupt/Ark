@@ -26,11 +26,31 @@ def main():
             "positive_by_class": {str(i): int(sum(i in x for x in labels)) for i in range(1, 11)},
         }
     sub = pd.read_csv(args.submission, dtype={"Study_id": str})
-    if set(sub.columns) < {"Study_id", "Predict_class", "Probability", "Gate"}:
-        raise ValueError("Submission must contain ten class probabilities and Gate for every Study_id")
+    required = ["Subject_id", "Study_id", "Predict_class", "Probability", "Gate"]
+    if list(sub.columns) != required:
+        raise ValueError(f"Submission columns must be {required}")
+    if sub[required].isna().any().any():
+        raise ValueError("Missing submission values")
+    if sub.duplicated(["Study_id", "Predict_class"]).any():
+        raise ValueError("Duplicate study-class predictions")
+    coverage = sub.groupby("Study_id").Predict_class.apply(lambda ids: sorted(ids.tolist()))
+    if not coverage.map(lambda ids: ids == list(range(1, 11))).all():
+        raise ValueError("Every study must contain class IDs 1 through 10 exactly once")
+    values = sub[["Probability", "Gate"]].to_numpy(dtype=float)
+    if not np.isfinite(values).all() or not ((values >= 0) & (values <= 1)).all():
+        raise ValueError("Nonfinite or out-of-range probabilities/thresholds")
+    test = pd.read_csv(args.raw_root/"test.csv", dtype=str)
+    if not test.groupby("Study_id").Subject_id.nunique().eq(1).all():
+        raise ValueError("A test study maps to more than one subject")
+    subjects = test[["Study_id", "Subject_id"]].drop_duplicates().set_index("Study_id").Subject_id
+    if set(sub.Study_id) != set(subjects.index):
+        raise ValueError("Submission study IDs differ from official test metadata")
+    if not sub.Subject_id.eq(sub.Study_id.map(subjects)).all():
+        raise ValueError("Submission subject IDs do not match official test metadata")
     sub["positive"] = sub["Probability"] >= sub["Gate"]
     per_study = sub.groupby("Study_id", sort=False).positive.sum()
     report["submission"] = {
+        "format_and_coverage_verified": True,
         "rows": len(sub), "studies": int(sub.Study_id.nunique()),
         "rows_per_study": {str(k): int(v) for k, v in sub.groupby("Study_id").size().value_counts().items()},
         "predicted_positive_count_distribution": {str(k): int(v) for k, v in per_study.value_counts().sort_index().items()},

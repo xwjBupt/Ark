@@ -42,6 +42,9 @@ def main():
         gpu, name, size, seed, lr = spec
         output = args.output/"runs"/name
         output.mkdir(parents=True, exist_ok=True)
+        if args.resume and (output/"DONE.json").exists():
+            status(name, state="done", gpu=gpu)
+            return name, 0
         free = int(subprocess.check_output(["nvidia-smi", f"--id={gpu}", "--query-gpu=memory.free",
                                             "--format=csv,noheader,nounits"], text=True).strip())
         if free < 40000:
@@ -75,7 +78,7 @@ def main():
         raise RuntimeError("All ImageNet-only runs failed")
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="4", OMP_NUM_THREADS="4", MKL_NUM_THREADS="4")
     command = [sys.executable, "-u", str(ROOT/"experiments/cxr_multiview/finalize.py"), "--data", str(data),
-               "--output", str(args.output/"final"), "--runs", *map(str, successful)]
+               "--output", str(args.output/"final"), "--require-imagenet", "--runs", *map(str, successful)]
     with (args.output/"finalize.log").open("a") as log:
         child = subprocess.Popen(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         status("finalize", state="running", gpu=4, pid=child.pid)
